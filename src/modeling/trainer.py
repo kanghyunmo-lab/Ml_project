@@ -63,6 +63,25 @@ class ModelTrainer:
         if params:
             self.params.update(params)
     
+    def _convert_labels(self, y: pd.Series, to_lightgbm: bool = True) -> pd.Series:
+        """
+        레이블을 LightGBM 호환 형식으로 변환하거나 원래 형식으로 되돌립니다.
+        
+        Args:
+            y: 변환할 레이블 시리즈
+            to_lightgbm: True면 [-1, 0, 1] -> [0, 1, 2]로 변환, False면 반대로 변환
+            
+        Returns:
+            변환된 레이블 시리즈
+        """
+        y = y.copy()
+        if to_lightgbm:
+            # [-1, 0, 1] -> [0, 1, 2]
+            return y.map({-1: 0, 0: 1, 1: 2})
+        else:
+            # [0, 1, 2] -> [-1, 0, 1]
+            return y.map({0: -1, 1: 0, 2: 1})
+            
     def train(
         self, 
         X: pd.DataFrame, 
@@ -90,6 +109,8 @@ class ModelTrainer:
         Returns:
             Dict[str, Any]: 훈련 결과 메트릭
         """
+        # 레이블을 LightGBM 호환 형식으로 변환 ([-1, 0, 1] -> [0, 1, 2])
+        y_lgb = self._convert_labels(y, to_lightgbm=True)
         logger.info("Starting model training...")
         
         # 1. 하이퍼파라미터 최적화
@@ -108,15 +129,15 @@ class ModelTrainer:
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
             
-            # LightGBM 데이터셋으로 변환
-            train_data = lgb.Dataset(X_train, label=y_train)
-            val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
+            # LightGBM 데이터셋으로 변환 (레이블은 변환된 버전 사용)
+            X_train_lgb = lgb.Dataset(X_train, label=self._convert_labels(y_train, to_lightgbm=True))
+            X_val_lgb = lgb.Dataset(X_val, label=self._convert_labels(y_val, to_lightgbm=True), reference=X_train_lgb)
             
             # 모델 훈련
             self.model = lgb.train(
                 params=self.params,
-                train_set=train_data,
-                valid_sets=[train_data, val_data],
+                train_set=X_train_lgb,
+                valid_sets=[X_train_lgb, X_val_lgb],
                 valid_names=['train', 'valid'],
                 callbacks=[
                     lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=True),
@@ -124,16 +145,18 @@ class ModelTrainer:
                 ]
             )
             
-            # 검증 세트 예측 및 평가
-            y_pred = self.predict(X_val)
+            # 검증 세트 예측 및 평가 (예측은 다시 원래 레이블 형식으로 변환)
+            y_pred_proba = self.model.predict(X_val, num_iteration=self.model.best_iteration)
+            y_pred_lgb = np.argmax(y_pred_proba, axis=1)
+            y_pred = self._convert_labels(pd.Series(y_pred_lgb), to_lightgbm=False)
             metrics = self._evaluate(y_val, y_pred)
             fold_metrics.append(metrics)
             
             logger.info(f"Fold {fold + 1} - Accuracy: {metrics['accuracy']:.4f}, F1: {metrics['f1_weighted']:.4f}")
         
-        # 3. 전체 데이터로 최종 모델 훈련
+        # 3. 전체 데이터로 최종 모델 훈련 (변환된 레이블 사용)
         logger.info("Training final model on full dataset...")
-        full_data = lgb.Dataset(X, label=y)
+        full_data = lgb.Dataset(X, label=y_lgb)
         self.model = lgb.train(
             params=self.params,
             train_set=full_data,
@@ -155,6 +178,57 @@ class ModelTrainer:
         
         logger.info(f"Training completed. Avg Accuracy: {avg_metrics['accuracy']:.4f}")
         return avg_metrics
+    
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """
+        훈련된 모델로 예측을 수행합니다.
+        
+        Args:
+            X (pd.DataFrame): 예측할 데이터
+            
+        Returns:
+            np.ndarray: 예측 클래스 (1, 0, -1)
+        """
+        if self.model is None:
+            raise ValueError("Model is not trained yet. Call train() first.")
+            
+        # 예측 확률을 클래스로 변환 (LightGBM 형식 [0,1,2]를 원래 형식 [-1,0,1]로 변환)
+        pred_proba = self.model.predict(X, num_iteration=self.model.best_iteration)
+        y_pred_lgb = np.argmax(pred_proba, axis=1)
+        return self._convert_labels(pd.Series(y_pred_lgb), to_lightgbm=False).values
+    
+    def _evaluate(
+        self, 
+        y_true: Union[pd.Series, np.ndarray], 
+        y_pred: Union[pd.Series, np.ndarray]
+    ) -> Dict[str, Any]:
+        """
+        모델 성능을 평가합니다.
+        
+        PRD 요구사항: 정확도, F1-score, 혼동 행렬
+        
+        Args:
+            y_true: 실제 타겟 값 (-1, 0, 1)
+            y_pred: 예측된 타겟 값 (-1, 0, 1)
+            
+        Returns:
+            Dict[str, Any]: 평가 메트릭 딕셔너리
+        """
+        # numpy 배열로 변환
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
+        
+        # 메트릭 계산
+        accuracy = accuracy_score(y_true, y_pred)
+        f1 = f1_score(y_true, y_pred, average='weighted')
+        cm = confusion_matrix(y_true, y_pred, labels=[-1, 0, 1])
+        
+        return {
+            'accuracy': accuracy,
+            'f1_weighted': f1,
+            'confusion_matrix': cm,
+            'classification_report': classification_report(y_true, y_pred, target_names=['Down', 'Neutral', 'Up'], output_dict=True)
+        }
     
     def _optimize_hyperparameters(
         self, 
@@ -194,16 +268,22 @@ class ModelTrainer:
                 
                 model = lgb.train(
                     params=model_params,
-                    train_set=lgb.Dataset(X_train, label=y_train),
-                    valid_sets=[lgb.Dataset(X_val, label=y_val)],
-                    callbacks=[lgb.early_stopping(50, verbose=False)],
-                    verbose_eval=False
+                    train_set=lgb.Dataset(X_train, label=self._convert_labels(y_train, to_lightgbm=True)),
+                    valid_sets=[lgb.Dataset(X_val, label=self._convert_labels(y_val, to_lightgbm=True))],
+                    callbacks=[
+                        lgb.early_stopping(50, verbose=False),
+                        lgb.log_evaluation(0)  # 로깅 비활성화
+                    ]
                 )
                 
-                y_pred = model.predict(X_val, num_iteration=model.best_iteration)
-                y_pred = np.argmax(y_pred, axis=1)  # 확률을 클래스로 변환
-                score = f1_score(y_val, y_pred, average='weighted')
-                scores.append(score)
+                # 예측 (LightGBM 형식 [0,1,2]를 원래 형식 [-1,0,1]로 변환)
+                y_pred_proba = model.predict(X_val, num_iteration=model.best_iteration)
+                y_pred_lgb = np.argmax(y_pred_proba, axis=1)
+                y_pred = self._convert_labels(pd.Series(y_pred_lgb), to_lightgbm=False)
+                
+                # 정확도 계산 (원본 레이블과 비교)
+                accuracy = accuracy_score(y_val, y_pred)
+                scores.append(accuracy)
             
             return np.mean(scores)
         
@@ -346,19 +426,87 @@ class ModelTrainer:
 
 # 사용 예시
 if __name__ == "__main__":
-    # 예제 데이터 생성
-    np.random.seed(42)
-    X = pd.DataFrame(np.random.rand(1000, 10), columns=[f'feature_{i}' for i in range(10)])
-    y = pd.Series(np.random.choice([-1, 0, 1], size=1000))
-    
-    # 모델 훈련
-    trainer = ModelTrainer()
-    metrics = trainer.train(X, y, n_splits=3, n_trials=10, optimize=True)
-    
-    # 모델 저장
-    trainer.save_model('models/lightgbm_model')
-    
-    # 모델 로드
-    loaded_trainer = ModelTrainer.load_model('models/lightgbm_model')
-    predictions = loaded_trainer.predict(X)
-    print(f"Predictions: {predictions[:10]}...")
+    try:
+        import os
+        import pandas as pd
+        from pathlib import Path
+        
+        # 설정 로더 임포트
+        try:
+            from src.utils.config_loader import get_data_path
+        except ImportError:
+            # 스크립트에서 직접 실행되는 경우를 대비한 상대 경로 임포트
+            import sys
+            sys.path.append(str(Path(__file__).parent.parent))
+            from utils.config_loader import get_data_path
+        
+        # 데이터 파일 경로 가져오기
+        try:
+            data_path = get_data_path('btc_usdt_4h')
+            print(f"데이터 로드 중: {data_path}")
+            data = pd.read_parquet(data_path)
+            
+            # 데이터 확인
+            print("\n데이터 샘플:")
+            print(data.head(3))
+            print(f"\n데이터 크기: {len(data)}개")
+            print("\n컬럼 목록:", data.columns.tolist())
+            
+        except Exception as e:
+            print(f"데이터 로드 중 오류 발생: {e}")
+            raise
+        print(data.head())
+        
+        # 타겟 변수 확인 (예시로 'target' 컬럼을 타겟으로 가정)
+        # 실제 데이터에 맞게 수정이 필요할 수 있습니다.
+        if 'target' not in data.columns:
+            raise ValueError("'target' 컬럼을 찾을 수 없습니다. 데이터를 확인해주세요.")
+        
+        # 피처와 타겟 분리
+        feature_columns = [col for col in data.columns if col != 'target']
+        X = data[feature_columns]
+        y = data['target']
+        
+        # 클래스 분포 확인
+        print("\n클래스 분포:")
+        print(y.value_counts().sort_index())
+        
+        # 모델 훈련
+        print("\n모델 훈련을 시작합니다...")
+        trainer = ModelTrainer()
+        metrics = trainer.train(
+            X, y,
+            n_splits=5,  # 시계열 데이터이므로 5-10 정도가 적절
+            n_trials=50,  # 하이퍼파라미터 최적화 시도 횟수
+            optimize=True,  # 하이퍼파라미터 최적화 활성화
+            early_stopping_rounds=50
+        )
+        
+        # 결과 출력
+        print("\n훈련 완료. 성능 메트릭:")
+        print(f"평균 정확도: {metrics['accuracy']:.4f}")
+        print(f"평균 F1 점수: {metrics['f1_weighted']:.4f}")
+        print("\n평균 혼동 행렬:")
+        print(metrics['confusion_matrix'])
+        
+        # 모델 저장
+        model_dir = Path('../../models')
+        model_dir.mkdir(exist_ok=True)
+        model_path = model_dir / 'lightgbm_model'
+        trainer.save_model(str(model_path))
+        print(f"\n모델이 성공적으로 저장되었습니다: {model_path}")
+        
+        # 특성 중요도 출력
+        if hasattr(trainer, 'feature_importances_'):
+            print("\n상위 10개 특성 중요도:")
+            print(trainer.feature_importances_.head(10))
+            
+            # 예측 테스트
+            predictions = trainer.predict(X.iloc[:5])
+            print("\n예측 결과 (처음 5개 샘플):")
+            print(predictions)
+            
+    except Exception as e:
+        import traceback
+        print("\n오류 발생:")
+        print(traceback.format_exc())

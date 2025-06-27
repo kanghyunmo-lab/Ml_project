@@ -21,6 +21,50 @@ logger.add(
     format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
 )
 
+def clean_ohlcv_data(df: pd.DataFrame, save_path: Optional[Union[str, Path]] = None) -> pd.DataFrame:
+    """
+    OHLCV 데이터를 정제하는 함수
+    
+    Args:
+        df (pd.DataFrame): 정제할 OHLCV 데이터프레임
+        save_path (Optional[Union[str, Path]], optional): 정제된 데이터를 저장할 경로. 기본값은 None.
+        
+    Returns:
+        pd.DataFrame: 정제된 데이터프레임
+    """
+    try:
+        logger.info("OHLCV 데이터 정제를 시작합니다...")
+        
+        # DataCleaner 인스턴스 생성 (기본 설정 사용)
+        cleaner = DataCleaner()
+        
+        # 데이터 정제 실행
+        cleaned_df = cleaner.clean_data(df)
+        
+        # 결과 저장 경로가 제공된 경우 저장
+        if save_path:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 파일 확장자에 따라 저장 포맷 결정
+            if save_path.suffix == '.parquet':
+                cleaned_df.to_parquet(save_path, index=False)
+            elif save_path.suffix == '.csv':
+                cleaned_df.to_csv(save_path, index=False)
+            else:
+                # 기본값으로 parquet 형식 사용
+                save_path = save_path.with_suffix('.parquet')
+                cleaned_df.to_parquet(save_path, index=False)
+            
+            logger.info(f"정제된 데이터가 저장되었습니다: {save_path}")
+        
+        logger.info("OHLCV 데이터 정제가 완료되었습니다.")
+        return cleaned_df
+        
+    except Exception as e:
+        logger.error(f"OHLCV 데이터 정제 중 오류가 발생했습니다: {str(e)}")
+        raise
+
 class DataCleanerConfig(BaseModel):
     """데이터 정제를 위한 설정 클래스"""
     
@@ -290,6 +334,50 @@ def main():
     except Exception as e:
         logger.error(f"오류 발생: {e}")
         return 1
+
+def clean_ohlcv_data(df: pd.DataFrame, save_path: Optional[Union[str, Path]] = None) -> pd.DataFrame:
+    """
+    OHLCV 데이터를 정제하는 함수
+    
+    Args:
+        df (pd.DataFrame): 정제할 OHLCV 데이터프레임
+        save_path (Optional[Union[str, Path]], optional): 정제된 데이터를 저장할 경로. 기본값은 None.
+        
+    Returns:
+        pd.DataFrame: 정제된 데이터프레임
+    """
+    try:
+        logger.info("OHLCV 데이터 정제를 시작합니다...")
+        
+        # DataCleaner 인스턴스 생성 (기본 설정 사용)
+        cleaner = DataCleaner()
+        
+        # 데이터 정제 실행
+        cleaned_df = cleaner.clean_data(df)
+        
+        # 결과 저장 경로가 제공된 경우 저장
+        if save_path:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 파일 확장자에 따라 저장 포맷 결정
+            if save_path.suffix == '.parquet':
+                cleaned_df.to_parquet(save_path, index=False)
+            elif save_path.suffix == '.csv':
+                cleaned_df.to_csv(save_path, index=False)
+            else:
+                # 기본값으로 parquet 형식 사용
+                save_path = save_path.with_suffix('.parquet')
+                cleaned_df.to_parquet(save_path, index=False)
+            
+            logger.info(f"정제된 데이터가 저장되었습니다: {save_path}")
+        
+        logger.info("OHLCV 데이터 정제가 완료되었습니다.")
+        return cleaned_df
+        
+    except Exception as e:
+        logger.error(f"OHLCV 데이터 정제 중 오류가 발생했습니다: {str(e)}")
+        raise
 
 if __name__ == "__main__":
     import sys

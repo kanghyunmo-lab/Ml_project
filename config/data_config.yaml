@@ -1,0 +1,23 @@
+# 데이터 파일 경로 설정
+data:
+  base_dir: data  # 기본 데이터 디렉토리
+  processed_dir: processed  # 처리된 데이터가 저장되는 디렉토리
+  
+  # 데이터 파일 목록
+  files:
+    # BTC/USDT 4시간 봉 데이터 (기본)
+    btc_usdt_4h: btc_usdt_4h_20191231_20250627_cleaned.parquet
+    btc_usdt_4h_features: btc_usdt_4h_features.parquet
+    btc_usdt_4h_with_target: btc_usdt_4h_with_target.parquet
+    
+    # 다른 시간대 데이터 예시 (필요시 주석 해제)
+    # btc_usdt_1h: btc_usdt_1h_20230101_20230630_cleaned.parquet
+    # eth_usdt_4h: eth_usdt_4h_20220101_20230630_cleaned.parquet
+
+# 모델 설정
+model:
+  output_dir: models  # 모델이 저장될 디렉토리
+  
+# 로깅 설정
+logging:
+  level: INFO  # 로그 레벨 (DEBUG, INFO, WARNING, ERROR, CRITICAL)

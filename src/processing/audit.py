@@ -229,32 +229,60 @@ def load_and_audit_data(filepath: str, symbol: str = "BTC/USDT") -> DataQualityM
         report_path = save_audit_report(report)
         logger.info(f"감사 보고서: {report_path}")
         
-        return report
+        return report.dict()
         
     except Exception as e:
         logger.error(f"데이터 로드 또는 감사 중 오류 발생: {e}")
+        raise
+
+def run_data_audit(data: pd.DataFrame, symbol: str = "BTC/USDT") -> 'DataQualityMetrics':
+    """
+    데이터 품질 감사를 실행하고 결과를 반환합니다.
+    
+    Args:
+        data (pd.DataFrame): 감사할 데이터프레임
+        symbol (str, optional): 심볼 (예: 'BTC/USDT'). 기본값은 "BTC/USDT".
+        
+    Returns:
+        DataQualityMetrics: 데이터 품질 지표를 포함한 객체
+    """
+    try:
+        # 데이터 품질 감사기 초기화
+        auditor = DataQualityAuditor(data, symbol)
+        
+        # 감사 실행 및 보고서 생성
+        report_obj = auditor.generate_report()
+        report = report_obj.dict()
+        
+        # 감사 결과 로깅 (객체 사용)
+        logger.info(f"데이터 품질 감사가 완료되었습니다. {report_obj.total_rows}개의 행을 분석했습니다.")
+        logger.info(f"- 결측치: {sum(report_obj.missing_values.values())}개")
+        logger.info(f"- 중복 행: {report_obj.duplicate_rows}개")
+        logger.info(f"- 누락된 기간: {len(report_obj.gaps_in_timeline)}개")
+        
+        return report
+        
+    except Exception as e:
+        logger.error(f"데이터 품질 감사 중 오류가 발생했습니다: {str(e)}")
         raise
 
 if __name__ == "__main__":
     # 사용 예시
     import sys
     
-    if len(sys.argv) < 2:
-        print("사용법: python -m src.processing.audit <parquet_file> [symbol]")
-        sys.exit(1)
-    
-    filepath = sys.argv[1]
-    symbol = sys.argv[2] if len(sys.argv) > 2 else "BTC/USDT"
-    
-    try:
-        report = load_and_audit_data(filepath, symbol)
-        print("\n=== 데이터 품질 감사 요약 ===")
-        print(f"기간: {report.start_date} ~ {report.end_date}")
-        print(f"총 행 수: {report.total_rows:,}")
-        print(f"결측치: {report.missing_values}")
-        print(f"중복 행: {report.duplicate_rows}")
-        print(f"타임라인 갭: {len(report.gaps_in_timeline)}개")
+    if len(sys.argv) > 1:
+        filepath = sys.argv[1]
+        symbol = sys.argv[2] if len(sys.argv) > 2 else "BTC/USDT"
         
-    except Exception as e:
-        logger.error(f"오류 발생: {e}")
-        sys.exit(1)
+        try:
+            report = load_and_audit_data(filepath, symbol)
+            print(f"\n감사 보고서가 성공적으로 생성되었습니다. {report.total_rows}개의 행을 분석했습니다.")
+            print(f"- 결측치: {sum(report.missing_values.values())}개")
+            print(f"- 중복 행: {report.duplicate_rows}개")
+            print(f"- 누락된 기간: {len(report.gaps_in_timeline)}개")
+            
+        except Exception as e:
+            print(f"오류가 발생했습니다: {str(e)}")
+    else:
+        print("사용법: python -m src.processing.audit <parquet_file_path> [symbol]")
+        print("예시: python -m src.processing.audit ../data/raw/btc_usdt_4h.parquet BTC/USDT")

@@ -1,3 +1,4 @@
+from pathlib import Path
 import pandas as pd
 import numpy as np
 import pandas_ta as ta  # 기술적 분석을 위한 라이브러리
@@ -281,8 +282,51 @@ def create_features(data: pd.DataFrame) -> pd.DataFrame:
     Returns:
         pd.DataFrame: 피처가 추가된 DataFrame
     """
-    feature_engineer = FeatureEngineer(data)
-    return feature_engineer.add_technical_indicators()
+    fe = FeatureEngineer(data)
+    return fe.add_technical_indicators()
+
+
+def generate_features(data: pd.DataFrame, save_path: Optional[str] = None) -> pd.DataFrame:
+    """
+    피처를 생성하고 선택적으로 저장하는 함수
+    
+    Args:
+        data (pd.DataFrame): 입력 데이터프레임 (OHLCV 데이터 포함)
+        save_path (Optional[str]): 피처를 저장할 파일 경로. None인 경우 저장하지 않음.
+        
+    Returns:
+        pd.DataFrame: 피처가 추가된 데이터프레임
+    """
+    try:
+        logger.info("피처 엔지니어링을 시작합니다...")
+        
+        # FeatureEngineer를 사용하여 피처 생성
+        fe = FeatureEngineer(data)
+        features_df = fe.add_technical_indicators()
+        
+        # 결과 저장
+        if save_path:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 파일 확장자에 따라 저장 포맷 결정
+            if save_path.suffix == '.parquet':
+                features_df.to_parquet(save_path, index=False)
+            elif save_path.suffix == '.csv':
+                features_df.to_csv(save_path, index=False)
+            else:
+                # 기본값으로 parquet 형식 사용
+                save_path = save_path.with_suffix('.parquet')
+                features_df.to_parquet(save_path, index=False)
+            
+            logger.info(f"피처가 저장되었습니다: {save_path}")
+        
+        logger.info("피처 엔지니어링이 완료되었습니다.")
+        return features_df
+        
+    except Exception as e:
+        logger.error(f"피처 엔지니어링 중 오류가 발생했습니다: {str(e)}")
+        raise
 
 
 if __name__ == "__main__":

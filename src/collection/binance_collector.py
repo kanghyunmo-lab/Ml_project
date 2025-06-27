@@ -7,6 +7,7 @@
 - 중복 데이터 처리 및 데이터 무결성 검증
 """
 import os
+from pathlib import Path
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
@@ -126,6 +127,41 @@ class BinanceDataCollector:
         
         return result_df
     
+    def collect_historical_data(
+        self,
+        symbol: str = "BTC/USDT",
+        timeframe: str = "4h",
+        start_date: str = None,
+        end_date: str = None,
+        save_path: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """지정 기간의 데이터를 수집하고 (선택적으로) 저장합니다.
+
+        Args:
+            symbol (str): 거래 쌍 (예: "BTC/USDT")
+            timeframe (str): 타임프레임 (예: "4h")
+            start_date (str): 시작 날짜 (YYYY-MM-DD)
+            end_date (str): 종료 날짜 (YYYY-MM-DD). None이면 현재 시점까지
+            save_path (Optional[str]): 데이터를 저장할 경로. None이면 저장하지 않음.
+
+        Returns:
+            pd.DataFrame: 수집된 OHLCV 데이터
+        """
+        # 객체 속성 갱신
+        self.symbol = symbol
+        self.timeframe = timeframe
+
+        df = self.fetch_ohlcv(start_date=start_date, end_date=end_date)
+
+        if save_path and not df.empty:
+            # 저장
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(save_path, index=False)
+            logger.info(f"수집된 데이터가 저장되었습니다: {save_path}")
+
+        return df
+
     def save_to_parquet(self, df: pd.DataFrame, filename: str) -> None:
         """
         데이터프레임을 Parquet 형식으로 저장합니다.
