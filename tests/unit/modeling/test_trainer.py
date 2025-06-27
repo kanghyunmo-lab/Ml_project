@@ -20,13 +20,22 @@ from src.modeling.trainer import ModelTrainer
 
 # 테스트용 가상 데이터 생성
 def create_test_data(n_samples=1000, n_features=10):
-    """테스트용 가상 데이터 생성"""
-    np.random.seed(42)
+    """
+    테스트용 가상 데이터 생성
+    
+    매개변수:
+        n_samples (int): 생성할 샘플 수 (기본값: 1000)
+        n_features (int): 생성할 특성 수 (기본값: 10)
+        
+    반환:
+        tuple: (X, y) 형태의 튜플. X는 특성 데이터프레임, y는 타겟 시리즈
+    """
+    np.random.seed(42)  # 재현성을 위한 시드 고정
     X = pd.DataFrame(
-        np.random.randn(n_samples, n_features),
-        columns=[f'feature_{i}' for i in range(n_features)]
+        np.random.randn(n_samples, n_features),  # 정규분포를 따르는 랜덤 데이터
+        columns=[f'feature_{i}' for i in range(n_features)]  # feature_0, feature_1, ...
     )
-    y = pd.Series(np.random.choice([-1, 0, 1], size=n_samples))
+    y = pd.Series(np.random.choice([-1, 0, 1], size=n_samples))  # -1, 0, 1 중 랜덤 선택
     return X, y
 
 class TestModelTrainer:

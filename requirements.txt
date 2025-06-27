@@ -17,6 +17,14 @@ lightgbm>=3.3.0
 optuna>=2.10.0
 joblib>=1.1.0
 
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.2
+
+# Testing
+pytest>=7.0.0
+pytest-cov>=3.0.0
+
 # Backtesting
 backtrader>=1.9.76.123
 vectorbt>=0.21.0
