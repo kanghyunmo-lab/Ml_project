@@ -48,8 +48,6 @@
     - [x] src/processing/clean.py 파일 생성
     - [x] 감사 리포트를 바탕으로 데이터를 정제하고, data/processed/ 폴더에 저장하는 함수 구현
 
-### 5. 다음에 수행할 작업 (Next Task)
-
 ### Phase 2: 핵심 엔진 개발 (Core Engine Development)
 **목표:** 정제된 데이터를 바탕으로 예측 모델을 만들고, 그 성능을 엄격하게 검증할 수 있는 백테스팅 엔진을 완성한다.
 
@@ -65,10 +63,18 @@
     - [X] 실제 바이낸스 데이터를 활용한 통합 테스트 완료
     - [X] 시각화 기능을 포함한 예제 스크립트 작성
 
-- [ ] **🔹 Task 2.3: 모델 훈련 파이프라인 구현 (현재 작업 중)**
-    - [ ] src/modeling/trainer.py 파일 생성
-    - [ ] TimeSeriesSplit을 이용한 시계열 교차검증 구조 구현
-    - [ ] Optuna를 사용하여 LightGBM 모델의 하이퍼파라미터를 최적화하고, 훈련된 최종 모델을 파일로 저장하는 기능 구현
+### 5. 다음에 수행할 작업 (Next Task)
+
+- [X] **Task 2.3: 모델 훈련 파이프라인 구현**
+    - [X] src/modeling/trainer.py 파일 생성
+    - [X] TimeSeriesSplit을 이용한 시계열 교차검증 구조 구현
+    - [X] Optuna를 사용하여 LightGBM 모델의 하이퍼파라미터 최적화
+    - [X] 모델 저장 및 로드 기능 구현
+    - [X] 단위 테스트 작성 (tests/unit/modeling/test_trainer.py) - 모든 테스트 케이스 통과 확인 완료
+    - [X] 예제 스크립트 추가 (examples/model_training_example.py)
+    - [X] 테스트 커버리지 개선 및 버그 수정 완료
+      - `test_evaluate`: 다중 클래스(-1, 0, 1) 평가 로직 검증
+      - `test_save_and_load_model`: 모델 저장/로드 기능 검증
 - [ ] **Task 2.4: 백테스팅 엔진 구현**
     - [ ] src/backtesting/engine.py 파일 생성
     - [ ] Backtrader를 사용하여, 훈련된 모델의 예측 신호를 바탕으로 거래를 시뮬레이션하는 엔진 구현
