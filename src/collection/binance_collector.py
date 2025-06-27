@@ -166,9 +166,9 @@ def main():
     # 데이터 수집기 초기화
     collector = BinanceDataCollector()
     
-    # 최근 1년치 데이터 수집 (예시)
+    # 2020년 1월 1일부터 현재까지 데이터 수집
     end_date = datetime.now().strftime("%Y-%m-%d")
-    start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+    start_date = "2020-01-01"  # 2020년 1월 1일부터
     
     logger.info(f"{start_date}부터 {end_date}까지의 데이터를 수집합니다...")
     
