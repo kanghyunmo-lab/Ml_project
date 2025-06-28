@@ -5,14 +5,26 @@
 현실적인 거래 조건을 시뮬레이션하고 성능 지표를 계산합니다.
 """
 
+import os
+import json
+import logging
 import pandas as pd
 import numpy as np
 import backtrader as bt
 from datetime import datetime, timedelta
-import logging
-from typing import Dict, Tuple, Optional, List, Any
-import json
-import os
+from typing import Dict, Tuple, Optional, List, Any, Union
+
+# Backtrader의 분석기 임포트
+try:
+    from backtrader.analyzers import SharpeRatio, DrawDown, TradeAnalyzer, Returns, TimeReturn, SQN
+except ImportError:
+    # 일부 버전에서는 직접 임포트가 안 될 수 있으므로 예외 처리
+    SharpeRatio = bt.analyzers.SharpeRatio
+    DrawDown = bt.analyzers.DrawDown
+    TradeAnalyzer = bt.analyzers.TradeAnalyzer
+    Returns = bt.analyzers.Returns
+    TimeReturn = bt.analyzers.TimeReturn
+    SQN = bt.analyzers.SQN
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -47,53 +59,68 @@ class BacktestEngine:
         self.results = {}
         self.analyzers = {}
     
-    def load_data(self, data_path: str) -> None:
-        """OHLCV 데이터를 백트레이더에 로드합니다.
+    def load_data(self, data: pd.DataFrame, price_col: str = 'close', 
+                 prediction_col: str = 'prediction', datetime_col: str = 'datetime') -> None:
+        """백테스트에 사용할 데이터를 로드합니다.
         
         매개변수:
-            data_path: OHLCV 데이터 파일 경로 (CSV 또는 Parquet 형식)
+            data: OHLCV 데이터를 포함한 데이터프레임
+            price_col: 가격 컬럼 이름 (기본값: 'close')
+            prediction_col: 예측값 컬럼 이름 (기본값: 'prediction')
+            datetime_col: 날짜/시간 컬럼 이름 (기본값: 'datetime')
         """
         try:
-            # Load data based on file extension
-            if data_path.endswith('.parquet'):
-                df = pd.read_parquet(data_path)
-            else:  # Assume CSV
-                df = pd.read_csv(data_path, parse_dates=['timestamp'], index_col='timestamp')
+            # 데이터프레임 복사 (원본 변경 방지)
+            df = data.copy()
             
-            # Ensure proper column names
-            df = df.rename(columns={
-                'open': 'Open',
-                'high': 'High',
-                'low': 'Low',
-                'close': 'Close',
-                'volume': 'Volume'
-            })
+            # datetime 컴럼이 있는 경우에만 처리
+            if datetime_col is not None:
+                # datetime 컴럼이 문자열인 경우 변환
+                if datetime_col in df.columns and not pd.api.types.is_datetime64_any_dtype(df[datetime_col]):
+                    df[datetime_col] = pd.to_datetime(df[datetime_col])
+                    
+                # 인덱스를 datetime으로 설정
+                df = df.set_index(datetime_col)
+            # datetime_col이 None이면 이미 인덱스가 설정되어 있다고 가정
             
-            # Create a custom data feed class that includes the prediction field
+            # 필요한 컬럼이 있는지 확인
+            required_cols = ['open', 'high', 'low', 'close', 'volume', prediction_col]
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            if missing_cols:
+                raise ValueError(f"필수 컬럼이 누락되었습니다: {missing_cols}")
+            
+            # 예측값이 범주형인 경우 숫자로 변환 (-1, 0, 1)
+            if not pd.api.types.is_numeric_dtype(df[prediction_col]):
+                df[prediction_col] = df[prediction_col].map({'sell': -1, 'hold': 0, 'buy': 1})
+            
+            # Backtrader용 데이터 피드 생성
             class PredictionData(bt.feeds.PandasData):
-                # Add the 'prediction' line to the lines of the data feed
-                lines = ('prediction',)
-                
-                # Define the parameters for the prediction line
-                params = (
-                    ('prediction', -1),  # Default value if no prediction column exists
-                )
+                lines = ('prediction',)  # 예측값 라인 추가
+                params = (('prediction', -1),)
             
-            # Create the data feed with the prediction field
-            data = PredictionData(
+            data_feed = PredictionData(
                 dataname=df,
-                datetime=None,  # Use index
-                open='Open',
-                high='High',
-                low='Low',
-                close='Close',
-                volume='Volume',
+                datetime=None,  # 인덱스 사용
+                open='open',
+                high='high',
+                low='low',
+                close='close',
+                volume='volume',
                 openinterest=None,
-                prediction='prediction'  # Map the prediction column
+                prediction=prediction_col  # 모델 예측값
             )
             
-            self.cerebro.adddata(data)
-            logger.info(f"Successfully loaded data from {data_path}")
+            # 데이터 피드를 Cerebro에 추가
+            self.cerebro.adddata(data_feed, name='btc_usdt')
+            
+            # 분석기 추가
+            self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
+            self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+            self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
+            self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+            self.cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')
+            
+            logger.info(f"Successfully loaded {len(df)} rows of data")
             
         except Exception as e:
             logger.error(f"Error loading data: {str(e)}")
@@ -119,143 +146,252 @@ class BacktestEngine:
         self.cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')  # For equity curve
     
     def run_backtest(self) -> Dict[str, Any]:
-        """Run the backtest and return results.
+        """백테스트를 실행하고 결과를 반환합니다.
         
-        Returns:
-            Dictionary containing backtest results and performance metrics
+        반환값:
+            백테스트 결과와 성능 지표를 포함하는 딕셔너리
         """
         try:
-            # Add analyzers
+            # 분석기 추가
             self.add_analyzers()
             
-            # Run the backtest
-            logger.info("Starting backtest...")
+            # 전략 추가 (아직 추가되지 않은 경우)
+            if not self.cerebro.strats:
+                self.cerebro.addstrategy(
+                    TripleBarrierStrategy,
+                    leverage=self.leverage,
+                    risk_per_trade=0.02,  # 거래당 위험 비중 (2%)
+                    stop_loss_pct=0.01,   # 1% 손절
+                    take_profit_pct=0.02   # 2% 익절
+                )
+            
+            # 백테스트 실행
+            logger.info("백테스트를 시작합니다...")
             results = self.cerebro.run()
             
-            # Extract and store results
-            self._process_results(results[0])
+            if not results or len(results) == 0:
+                raise ValueError("백테스트가 실행되지 않았습니다. 결과가 없습니다.")
             
-            logger.info("Backtest completed successfully")
-            return self.results
+            # 결과 추출 및 저장
+            strategy = results[0]
+            self._process_results(strategy)
+            
+            # 최종 결과 구성
+            final_results = {
+                'initial_capital': self.initial_capital,
+                'final_value': self.results.get('final_value', self.initial_capital),
+                'return_pct': self.results.get('return_pct', 0),
+                'kpis': self.results.get('kpis', {})
+            }
+            
+            logger.info("백테스트가 성공적으로 완료되었습니다.")
+            return final_results
             
         except Exception as e:
-            logger.error(f"Error during backtest: {str(e)}")
+            logger.error(f"백테스트 실행 중 오류가 발생했습니다: {str(e)}", exc_info=True)
             raise
     
     def _process_results(self, strategy) -> None:
-        """Process and store backtest results."""
-        # Store basic metrics
-        self.results['initial_capital'] = self.initial_capital
-        self.results['final_value'] = self.cerebro.broker.getvalue()
-        self.results['return_pct'] = (self.results['final_value'] / self.initial_capital - 1) * 100
-        
-        # Extract analyzer results
-        self.analyzers['sharpe'] = strategy.analyzers.sharpe.get_analysis()
-        self.analyzers['drawdown'] = strategy.analyzers.drawdown.get_analysis()
-        self.analyzers['returns'] = strategy.analyzers.returns.get_analysis()
-        self.analyzers['trades'] = strategy.analyzers.trades.get_analysis()
-        self.analyzers['sqn'] = strategy.analyzers.sqn.get_analysis()
-        self.analyzers['timereturn'] = strategy.analyzers.timereturn.get_analysis()
-        
-        # Calculate equity curve and other KPIs
-        self._calculate_equity_curve()
-        self._calculate_kpis()
+        """백테스트 결과를 처리하고 저장합니다."""
+        try:
+            # 기본 메트릭 저장
+            final_value = self.cerebro.broker.getvalue()
+            return_pct = (final_value / self.initial_capital - 1) * 100
+            
+            self.results.update({
+                'initial_capital': self.initial_capital,
+                'final_value': final_value,
+                'return_pct': return_pct
+            })
+            
+            # 분석기 결과 추출 (에러 방지를 위한 안전한 접근)
+            analyzers = {}
+            try:
+                analyzers['sharpe'] = strategy.analyzers.sharpe.get_analysis()
+            except Exception as e:
+                logger.warning(f"샤프 지수 계산 중 오류: {str(e)}")
+                analyzers['sharpe'] = {'sharperatio': 0.0}
+                
+            try:
+                analyzers['drawdown'] = strategy.analyzers.drawdown.get_analysis()
+            except Exception as e:
+                logger.warning(f"드로다운 계산 중 오류: {str(e)}")
+                analyzers['drawdown'] = {'max': {'drawdown': 0.0}}
+                
+            try:
+                analyzers['trades'] = strategy.analyzers.trades.get_analysis()
+            except Exception as e:
+                logger.warning(f"거래 분석 중 오류: {str(e)}")
+                analyzers['trades'] = {'total': {'total': 0, 'open': 0, 'closed': 0}, 
+                                     'won': {'total': 0, 'pnl': {'total': 0}}, 
+                                     'lost': {'total': 0, 'pnl': {'total': 0}}}
+            
+            self.analyzers = analyzers
+            
+            # KPI 계산
+            self._calculate_kpis()
+            
+            # 에퀴티 곡선 계산
+            self._calculate_equity_curve()
+            
+        except Exception as e:
+            logger.error(f"결과 처리 중 오류: {str(e)}", exc_info=True)
+            raise
     
     def _calculate_kpis(self) -> None:
-        """Calculate and store key performance indicators."""
-        # Safely extract metrics from analyzers using .get() with defaults
-        sharpe_ratio = self.analyzers.get('sharpe', {}).get('sharperatio') or 0
-        max_drawdown = self.analyzers.get('drawdown', {}).get('max', {}).get('drawdown', 0)
-        total_return = self.analyzers.get('returns', {}).get('rtot', 0) * 100  # as percentage
-
-        # Safely access trade analyzer results
-        trades_analysis = self.analyzers.get('trades', {})
-        total_trades = trades_analysis.get('total', {}).get('closed', 0)
-        
-        won_analysis = trades_analysis.get('won', {})
-        total_wins = won_analysis.get('total', 0)
-        gross_wins = won_analysis.get('pnl', {}).get('total', 0)
-
-        lost_analysis = trades_analysis.get('lost', {})
-        gross_losses = lost_analysis.get('pnl', {}).get('total', 0)  # This is a negative number
-
-        # Calculate Calmar Ratio (Return/MaxDD)
-        calmar_ratio = abs(total_return / max_drawdown) if max_drawdown != 0 else 0
-
-        # Calculate Profit Factor
-        profit_factor = gross_wins / abs(gross_losses) if gross_losses != 0 else float('inf')
-
-        # Store KPIs
-        self.results['kpis'] = {
-            'sharpe_ratio': sharpe_ratio,
-            'max_drawdown_pct': max_drawdown,
-            'total_return_pct': total_return,
-            'calmar_ratio': calmar_ratio,
-            'profit_factor': profit_factor,
-            'win_rate': (total_wins / total_trades * 100) if total_trades > 0 else 0,
-            'sqn': self.analyzers.get('sqn', {}).get('sqn', 0),
-            'number_of_trades': total_trades
-        }
+        """주요 성과 지표를 계산하고 저장합니다."""
+        try:
+            # 분석기에서 메트릭 안전하게 추출
+            sharpe_ratio = 0.0
+            max_drawdown = 0.0
+            
+            if 'sharpe' in self.analyzers:
+                sharpe_analysis = self.analyzers['sharpe'].get_analysis()
+                sharpe_ratio = float(sharpe_analysis.get('sharperatio', 0.0))
+            
+            if 'drawdown' in self.analyzers:
+                drawdown_analysis = self.analyzers['drawdown'].get_analysis()
+                max_drawdown = float(drawdown_analysis.get('max', {}).get('drawdown', 0.0))
+            
+            # 거래 분석 결과 추출
+            total_trades = 0
+            total_wins = 0
+            total_losses = 0
+            gross_wins = 0.0
+            gross_losses = 0.0
+            
+            if 'trades' in self.analyzers:
+                trades_analysis = self.analyzers['trades'].get_analysis()
+                total_trades = int(trades_analysis.get('total', {}).get('closed', 0))
+                total_wins = int(trades_analysis.get('won', {}).get('total', 0))
+                total_losses = int(trades_analysis.get('lost', {}).get('total', 0))
+                
+                # 수익/손실 금액 (양수/음수)
+                gross_wins = float(trades_analysis.get('won', {}).get('pnl', {}).get('total', 0.0) or 0.0)
+                gross_losses = abs(float(trades_analysis.get('lost', {}).get('pnl', {}).get('total', 0.0) or 0.0))
+            
+            # 승률 계산
+            win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
+            
+            # Profit Factor (총 수익 / 총 손실)
+            profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else float('inf')
+            
+            # KPI 딕셔너리 생성
+            kpis = {
+                'sharpe_ratio': round(sharpe_ratio, 2),
+                'max_drawdown_pct': round(max_drawdown, 2),
+                'profit_factor': round(profit_factor, 2) if profit_factor != float('inf') else float('inf'),
+                'win_rate': round(win_rate, 2),
+                'number_of_trades': total_trades,
+                'win_trades': total_wins,
+                'loss_trades': total_losses,
+                'total_return_pct': round(self.results.get('return_pct', 0.0), 2)
+            }
+            
+            # 결과에 KPI 저장
+            self.results['kpis'] = kpis
+            
+        except Exception as e:
+            logger.error(f"KPI 계산 중 오류: {str(e)}", exc_info=True)
+            # 오류 발생 시 기본값으로 채운 KPI 반환
+            self.results['kpis'] = {
+                'sharpe_ratio': 0.0,
+                'max_drawdown_pct': 0.0,
+                'profit_factor': 0.0,
+                'win_rate': 0.0,
+                'number_of_trades': 0,
+                'win_trades': 0,
+                'loss_trades': 0,
+                'total_return_pct': 0.0
+            }
     
     def _calculate_equity_curve(self) -> None:
-        """Calculate and store the equity curve from TimeReturn analyzer."""
-        returns = pd.Series(self.analyzers.get('timereturn', {}))
-        if not returns.empty:
-            cumulative_returns = (1 + returns).cumprod()
-            equity_curve = self.initial_capital * cumulative_returns
-            equity_curve.index = pd.to_datetime(equity_curve.index)
-            self.results['equity_curve'] = equity_curve.to_frame('equity')
-        else:
-            self.results['equity_curve'] = pd.DataFrame(columns=['equity'])
+        """에퀴티 곡선을 계산하고 저장합니다."""
+        try:
+            # TimeReturn 분석기에서 수익률 시계열 가져오기
+            if hasattr(self, 'analyzers') and 'timereturn' in self.analyzers:
+                timereturn = self.analyzers['timereturn']
+                if hasattr(timereturn, 'get_analysis'):
+                    returns = timereturn.get_analysis()
+                    if returns:
+                        self.equity_curve = pd.Series(returns)
+                        # 누적 수익률로 변환
+                        self.equity_curve = (1 + self.equity_curve).cumprod() - 1
+                        # 초기 자본을 곱하여 실제 가치로 변환
+                        self.equity_curve = (1 + self.equity_curve) * self.initial_capital
+                        # 결과에 저장
+                        self.results['equity_curve'] = self.equity_curve.to_dict()
+                        return
+            
+            # 분석기에서 가져오지 못한 경우 빈 시리즈 생성
+            self.equity_curve = pd.Series()
+            self.results['equity_curve'] = {}
+            
+        except Exception as e:
+            logger.error(f"에퀴티 곡선 계산 중 오류: {str(e)}", exc_info=True)
+            self.equity_curve = pd.Series()
+            self.results['equity_curve'] = {}
     
     def get_summary(self) -> Dict[str, Any]:
-        """Get a summary of the backtest results."""
+        """백테스트 결과 요약을 반환합니다."""
         return {
             'initial_capital': self.initial_capital,
-            'final_value': self.results['final_value'],
-            'total_return_pct': self.results['return_pct'],
-            **self.results.get('kpis', {})
+            'final_value': self.results.get('final_value', self.initial_capital),
+            'return_pct': self.results.get('return_pct', 0),
+            'kpis': self.results.get('kpis', {})
         }
     
     def generate_report(self, output_dir: str = 'reports') -> str:
-        """Generate a detailed backtest report.
+        """상세 백테스트 보고서를 생성합니다.
         
-        Args:
-            output_dir: Directory to save the report
+        매개변수:
+            output_dir: 보고서를 저장할 디렉토리 경로 (기본값: 'reports')
             
-        Returns:
-            Path to the generated report
+        반환값:
+            생성된 보고서 파일 경로
         """
-        os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        report_path = os.path.join(output_dir, f'backtest_report_{timestamp}.json')
-        
-        # Prepare report data
-        report_data = {
-            'timestamp': datetime.now().isoformat(),
-            'parameters': {
-                'initial_capital': self.initial_capital,
-                'commission': self.commission,
-                'leverage': self.leverage,
-                'slippage': self.slippage
-            },
-            'results': self.results,
-            'analyzers': {
-                'sharpe': self.analyzers['sharpe'].get_analysis(),
-                'drawdown': self.analyzers['drawdown'].get_analysis(),
-                'returns': self.analyzers['returns'].get_analysis(),
-                'trades': self.analyzers['trades'].get_analysis(),
-                'sqn': self.analyzers['sqn'].get_analysis()
-            },
-            'kpis': self.results.get('kpis', {})
-        }
-        
-        # Save report
-        with open(report_path, 'w') as f:
-            json.dump(report_path, f, indent=2, default=str)
-        
-        logger.info(f"Backtest report saved to {report_path}")
-        return report_path
+        try:
+            # 출력 디렉토리 생성
+            os.makedirs(output_dir, exist_ok=True)
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_path = os.path.join(output_dir, f'backtest_report_{timestamp}.json')
+            
+            # 보고서 데이터 준비
+            report_data = {
+                'timestamp': datetime.now().isoformat(),
+                'parameters': {
+                    'initial_capital': self.initial_capital,
+                    'commission': self.commission,
+                    'leverage': self.leverage,
+                    'slippage': self.slippage
+                },
+                'results': self.results,
+                'kpis': self.results.get('kpis', {})
+            }
+            
+            # 분석기 결과가 있는 경우에만 추가
+            if hasattr(self, 'analyzers'):
+                analyzers_data = {}
+                for name, analyzer in self.analyzers.items():
+                    try:
+                        analyzers_data[name] = analyzer.get_analysis()
+                    except Exception as e:
+                        logger.warning(f"분석기 {name}에서 데이터를 가져오는 중 오류: {str(e)}")
+                        analyzers_data[name] = str(e)
+                
+                if analyzers_data:
+                    report_data['analyzers'] = analyzers_data
+            
+            # 보고서 저장
+            with open(report_path, 'w', encoding='utf-8') as f:
+                json.dump(report_data, f, indent=2, ensure_ascii=False, default=str)
+            
+            logger.info(f"백테스트 보고서가 저장되었습니다: {report_path}")
+            return report_path
+            
+        except Exception as e:
+            logger.error(f"보고서 생성 중 오류가 발생했습니다: {str(e)}", exc_info=True)
+            raise
 
 
 class TripleBarrierStrategy(bt.Strategy):
@@ -265,62 +401,105 @@ class TripleBarrierStrategy(bt.Strategy):
     params = (
         ('leverage', 3),  # PRD에 따른 최대 레버리지
         ('risk_per_trade', 0.02),  # 거래당 2% 리스크
+        ('stop_loss_pct', 0.01),  # 1% 스탑로스
+        ('take_profit_pct', 0.02),  # 2% 익절
+        ('max_position_size', 0.1),  # 최대 포지션 크기 (전체 자본 대비)
     )
     
     def __init__(self):
         """전략을 초기화합니다."""
-        self.data_pred = self.datas[0].prediction  # 예측 데이터
+        # 예측 데이터 가져오기 (데이터 피드에 prediction 라인이 있어야 함)
+        self.prediction = self.datas[0].prediction
         self.order = None  # 주문 객체 초기화
         self.trade_count = 0  # 거래 횟수 카운터
+        self.entry_price = 0  # 진입 가격 추적
+        self.stop_loss = 0  # 스탑로스 가격
+        self.take_profit = 0  # 익절 가격
     
     def next(self):
         """Process each bar."""
         if self.order:
-            return  # Pending order exists
+            return  # 보류 중인 주문이 있으면 반환
             
-        # Get current prediction
-        prediction = self.data_pred[0]
+        # 현재 예측값 가져오기
+        current_pred = int(self.prediction[0])  # -1, 0, 1 중 하나여야 함
+        current_price = self.data.close[0]
         
-        # No position - check for entry
+        # 포지션이 없을 때 진입 신호 확인
         if not self.position:
-            if prediction == 1:  # Buy signal
-                self.enter_long()
-            elif prediction == -1:  # Short signal (if enabled)
-                self.enter_short()
+            if current_pred == 1:  # 매수 신호
+                self.enter_long(current_price)
+            elif current_pred == -1:  # 매도 신호
+                self.enter_short(current_price)
         else:
-            # Check for exit based on prediction
-            if (self.position.size > 0 and prediction == -1) or \
-               (self.position.size < 0 and prediction == 1):
+            # 포지션이 있을 때 청산 신호 확인
+            if (self.position.size > 0 and current_pred == -1) or \
+               (self.position.size < 0 and current_pred == 1):
                 self.close()
+            # 스탑로스/익절 확인
+            elif self.position.size > 0:  # 롱 포지션
+                if current_price <= self.stop_loss or current_price >= self.take_profit:
+                    self.close()
+            else:  # 숏 포지션
+                if current_price >= self.stop_loss or current_price <= self.take_profit:
+                    self.close()
     
-    def enter_long(self):
-        """Enter a long position with proper risk management."""
-        # Calculate position size based on 2% risk
-        stop_loss = self.data.close[0] * 0.99  # Example: 1% stop loss
+    def enter_long(self, current_price):
+        """롱 포지션을 진입합니다. 리스크 관리가 적용됩니다."""
+        # 스탑로스와 익절 가격 계산
+        stop_loss = current_price * (1 - self.p.stop_loss_pct)  # 예: 1% 스탑로스
+        take_profit = current_price * (1 + self.p.take_profit_pct)  # 예: 2% 익절
+        
+        # 포지션 사이즈 계산 (리스크 기반)
         risk_amount = self.broker.getvalue() * self.p.risk_per_trade
-        price_diff = self.data.close[0] - stop_loss
+        price_diff = current_price - stop_loss
         size = (risk_amount / price_diff) * self.p.leverage
         
-        # Place order
-        self.order = self.buy(size=size)
-        self.trade_count += 1
+        # 최대 포지션 크기 제한
+        max_size = (self.broker.getvalue() * self.p.max_position_size) / current_price
+        size = min(size, max_size)
+        
+        if size > 0:
+            # 주문 실행
+            self.order = self.buy(size=size)
+            self.entry_price = current_price
+            self.stop_loss = stop_loss
+            self.take_profit = take_profit
+            self.trade_count += 1
+            logger.info(f"LONG ENTRY - Price: {current_price:.2f}, "
+                      f"Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, "
+                      f"Size: {size:.4f}")
     
-    def enter_short(self):
-        """Enter a short position with proper risk management."""
-        # Similar to enter_long but for short positions
-        stop_loss = self.data.close[0] * 1.01  # Example: 1% stop loss
+    def enter_short(self, current_price):
+        """숏 포지션을 진입합니다. 리스크 관리가 적용됩니다."""
+        # 스탑로스와 익절 가격 계산
+        stop_loss = current_price * (1 + self.p.stop_loss_pct)  # 예: 1% 스탑로스
+        take_profit = current_price * (1 - self.p.take_profit_pct)  # 예: 2% 익절
+        
+        # 포지션 사이즈 계산 (리스크 기반)
         risk_amount = self.broker.getvalue() * self.p.risk_per_trade
-        price_diff = stop_loss - self.data.close[0]
+        price_diff = stop_loss - current_price
         size = (risk_amount / price_diff) * self.p.leverage
         
-        # Place order
-        self.order = self.sell(size=size)
-        self.trade_count += 1
+        # 최대 포지션 크기 제한
+        max_size = (self.broker.getvalue() * self.p.max_position_size) / current_price
+        size = min(size, max_size)
+        
+        if size > 0:
+            # 주문 실행
+            self.order = self.sell(size=size)
+            self.entry_price = current_price
+            self.stop_loss = stop_loss
+            self.take_profit = take_profit
+            self.trade_count += 1
+            logger.info(f"SHORT ENTRY - Price: {current_price:.2f}, "
+                      f"Stop Loss: {stop_loss:.2f}, Take Profit: {take_profit:.2f}, "
+                      f"Size: {size:.4f}")
     
     def notify_order(self, order):
-        """Handle order notifications."""
+        """주문 알림을 처리합니다."""
         if order.status in [order.Submitted, order.Accepted]:
-            return  # Awaiting execution
+            return  # 실행 대기 중
             
         if order.status in [order.Completed]:
             if order.isbuy():
@@ -329,20 +508,69 @@ class TripleBarrierStrategy(bt.Strategy):
                     f"Cost: {order.executed.value:.2f}, "
                     f"Comm: {order.executed.comm:.2f}"
                 )
+                # 롱 포지션 진입 시 포지션 정보 업데이트
+                if not hasattr(self, 'position_size'):
+                    self.position_size = order.executed.size
+                    self.position_value = order.executed.value
+                    self.entry_price = order.executed.price
+                    logger.info(f"LONG POSITION OPENED - Size: {self.position_size:.4f}, "
+                              f"Entry: {self.entry_price:.2f}")
+                
             elif order.issell():
                 log_text = (
                     f"SELL EXECUTED - Price: {order.executed.price:.2f}, "
                     f"Cost: {order.executed.value:.2f}, "
                     f"Comm: {order.executed.comm:.2f}"
                 )
+                # 숏 포지션 진입 시 포지션 정보 업데이트
+                if not hasattr(self, 'position_size') or self.position_size == 0:
+                    self.position_size = -order.executed.size  # 음수로 표시
+                    self.position_value = order.executed.value
+                    self.entry_price = order.executed.price
+                    logger.info(f"SHORT POSITION OPENED - Size: {abs(self.position_size):.4f}, "
+                              f"Entry: {self.entry_price:.2f}")
+                # 포지션 청산 시
+                elif (self.position_size > 0 and order.executed.size > 0) or \
+                     (self.position_size < 0 and order.executed.size < 0):
+                    pnl = (order.executed.price - self.entry_price) * order.executed.size
+                    pnl_pct = (pnl / (abs(self.entry_price * order.executed.size))) * 100
+                    logger.info(f"POSITION CLOSED - PnL: {pnl:.2f} ({pnl_pct:.2f}%)")
+                    self.position_size = 0
+                    self.position_value = 0
             
             logger.info(log_text)
+            
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            logger.warning(f"Order Canceled/Margin/Rejected: {order.getstatusname()}")
+            logger.warning(f"Order {order.getstatusname()}: {order.info if hasattr(order, 'info') else ''}")
         
-        self.order = None  # Reset order
+        self.order = None  # 주문 객체 초기화
     
     def stop(self):
-        """Called once at the end of the backtest."""
-        logger.info(f"Final Portfolio Value: {self.broker.getvalue():.2f}")
-        logger.info(f"Total Trades: {self.trade_count}")
+        """백테스트 종료 시 호출됩니다."""
+        # 최종 포트폴리오 가치 및 수익률 계산
+        final_value = self.broker.getvalue()
+        pnl = final_value - self.broker.startingcash
+        pnl_pct = (pnl / self.broker.startingcash) * 100
+        
+        # 거래 통계 로깅
+        logger.info("=" * 70)
+        logger.info(f"{'BACKTEST COMPLETED':^70}")
+        logger.info("=" * 70)
+        logger.info(f"{'Initial Portfolio Value:':<30} {self.broker.startingcash:>20.2f} USDT")
+        logger.info(f"{'Final Portfolio Value:':<30} {final_value:>20.2f} USDT")
+        logger.info(f"{'Profit/Loss:':<30} {pnl:>+20.2f} USDT ({pnl_pct:+.2f}%)")
+        logger.info(f"{'Total Trades:':<30} {self.trade_count:>20}")
+        
+        # 분석기 결과가 있으면 추가 정보 표시
+        if hasattr(self, 'analyzers'):
+            if hasattr(self.analyzers.sharpe, 'get_analysis'):
+                sharpe = self.analyzers.sharpe.get_analysis()
+                if 'sharperatio' in sharpe:
+                    logger.info(f"{'Sharpe Ratio:':<30} {sharpe['sharperatio']:>20.2f}")
+                    
+            if hasattr(self.analyzers.drawdown, 'get_analysis'):
+                drawdown = self.analyzers.drawdown.get_analysis()
+                if 'max' in drawdown and 'drawdown' in drawdown['max']:
+                    logger.info(f"{'Max Drawdown:':<30} {drawdown['max']['drawdown']:>19.2f}%")
+        
+        logger.info("=" * 70)
