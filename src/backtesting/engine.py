@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import backtrader as bt
 from datetime import datetime, timedelta
+import datetime  # datetime 모듈 임포트 추가
 from typing import Dict, Tuple, Optional, List, Any, Union
 
 # Backtrader의 분석기 임포트
@@ -137,13 +138,13 @@ class BacktestEngine:
     
     def add_analyzers(self):
         """Add performance analyzers."""
-        # Add built-in analyzers
-        self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
-        self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
-        self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
-        self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
-        self.cerebro.addanalyzer(bt.analyzers.SQN, _name='sqn')
-        self.cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')  # For equity curve
+        # Add built-in analyzers and store references
+        self.analyzers['sharpe'] = self.cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe')
+        self.analyzers['drawdown'] = self.cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
+        self.analyzers['returns'] = self.cerebro.addanalyzer(bt.analyzers.Returns, _name='returns')
+        self.analyzers['trades'] = self.cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='trades')
+        self.analyzers['sqn'] = self.cerebro.addanalyzer(bt.analyzers.SQN, _name='sqn')
+        self.analyzers['timereturn'] = self.cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')  # For equity curve
     
     def run_backtest(self) -> Dict[str, Any]:
         """백테스트를 실행하고 결과를 반환합니다.
@@ -204,29 +205,11 @@ class BacktestEngine:
                 'return_pct': return_pct
             })
             
-            # 분석기 결과 추출 (에러 방지를 위한 안전한 접근)
-            analyzers = {}
-            try:
-                analyzers['sharpe'] = strategy.analyzers.sharpe.get_analysis()
-            except Exception as e:
-                logger.warning(f"샤프 지수 계산 중 오류: {str(e)}")
-                analyzers['sharpe'] = {'sharperatio': 0.0}
-                
-            try:
-                analyzers['drawdown'] = strategy.analyzers.drawdown.get_analysis()
-            except Exception as e:
-                logger.warning(f"드로다운 계산 중 오류: {str(e)}")
-                analyzers['drawdown'] = {'max': {'drawdown': 0.0}}
-                
-            try:
-                analyzers['trades'] = strategy.analyzers.trades.get_analysis()
-            except Exception as e:
-                logger.warning(f"거래 분석 중 오류: {str(e)}")
-                analyzers['trades'] = {'total': {'total': 0, 'open': 0, 'closed': 0}, 
-                                     'won': {'total': 0, 'pnl': {'total': 0}}, 
-                                     'lost': {'total': 0, 'pnl': {'total': 0}}}
-            
-            self.analyzers = analyzers
+            # 분석기 객체 저장
+            self.analyzers = {}
+            if hasattr(strategy, 'analyzers'):
+                for analyzer_name, analyzer in strategy.analyzers.getitems():
+                    self.analyzers[analyzer_name] = analyzer
             
             # KPI 계산
             self._calculate_kpis()
@@ -239,57 +222,185 @@ class BacktestEngine:
             raise
     
     def _calculate_kpis(self) -> None:
-        """주요 성과 지표를 계산하고 저장합니다."""
+        """주요 KPI를 계산합니다."""
         try:
-            # 분석기에서 메트릭 안전하게 추출
-            sharpe_ratio = 0.0
-            max_drawdown = 0.0
-            
-            if 'sharpe' in self.analyzers:
-                sharpe_analysis = self.analyzers['sharpe'].get_analysis()
-                sharpe_ratio = float(sharpe_analysis.get('sharperatio', 0.0))
-            
-            if 'drawdown' in self.analyzers:
-                drawdown_analysis = self.analyzers['drawdown'].get_analysis()
-                max_drawdown = float(drawdown_analysis.get('max', {}).get('drawdown', 0.0))
-            
-            # 거래 분석 결과 추출
-            total_trades = 0
-            total_wins = 0
-            total_losses = 0
-            gross_wins = 0.0
-            gross_losses = 0.0
-            
-            if 'trades' in self.analyzers:
-                trades_analysis = self.analyzers['trades'].get_analysis()
-                total_trades = int(trades_analysis.get('total', {}).get('closed', 0))
-                total_wins = int(trades_analysis.get('won', {}).get('total', 0))
-                total_losses = int(trades_analysis.get('lost', {}).get('total', 0))
-                
-                # 수익/손실 금액 (양수/음수)
-                gross_wins = float(trades_analysis.get('won', {}).get('pnl', {}).get('total', 0.0) or 0.0)
-                gross_losses = abs(float(trades_analysis.get('lost', {}).get('pnl', {}).get('total', 0.0) or 0.0))
-            
-            # 승률 계산
-            win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0.0
-            
-            # Profit Factor (총 수익 / 총 손실)
-            profit_factor = (gross_wins / gross_losses) if gross_losses > 0 else float('inf')
-            
-            # KPI 딕셔너리 생성
+            # 기본값 초기화
             kpis = {
-                'sharpe_ratio': round(sharpe_ratio, 2),
-                'max_drawdown_pct': round(max_drawdown, 2),
-                'profit_factor': round(profit_factor, 2) if profit_factor != float('inf') else float('inf'),
-                'win_rate': round(win_rate, 2),
-                'number_of_trades': total_trades,
-                'win_trades': total_wins,
-                'loss_trades': total_losses,
-                'total_return_pct': round(self.results.get('return_pct', 0.0), 2)
+                'sharpe_ratio': 0.0,
+                'max_drawdown_pct': 0.0,
+                'number_of_trades': 0,
+                'win_rate': 0.0,
+                'profit_factor': 0.0,
+                'sqn': 0.0
+            }
+            
+            # Sharpe Ratio 계산 (있는 경우에만)
+            # 샤프 지수 계산 (연간 기준, 무위험 이자율 0% 가정)
+            try:
+                sharpe_value = None
+                if 'sharpe' in self.analyzers:
+                    sharpe_analysis = self.analyzers['sharpe'].get_analysis()
+                    if sharpe_analysis and 'sharperatio' in sharpe_analysis:
+                        sharpe_value = sharpe_analysis['sharperatio']
+                
+                # 유효한 숫자인지 확인
+                if sharpe_value is not None and not (isinstance(sharpe_value, (int, float)) and not isinstance(sharpe_value, bool)):
+                    raise ValueError(f"유효하지 않은 Sharpe Ratio 값: {sharpe_value}")
+                
+                kpis['sharpe_ratio'] = float(sharpe_value) if sharpe_value is not None else 0.0
+            except Exception as e:
+                logger.warning(f"Sharpe Ratio 계산 중 오류 발생: {str(e)}. 기본값 0.0을 사용합니다.")
+                kpis['sharpe_ratio'] = 0.0
+            
+            # 최대 낙폭(MDD) 계산
+            try:
+                drawdown_analysis = self.analyzers['drawdown'].get_analysis()
+                if isinstance(drawdown_analysis, dict) and 'max' in drawdown_analysis:
+                    mdd_pct = abs(drawdown_analysis['max'].get('drawdown', 0.0))
+                    # MDD가 100%를 초과하는 비정상적인 값 방지
+                    mdd_pct = min(100.0, mdd_pct) if mdd_pct is not None else 0.0
+                    kpis['max_drawdown_pct'] = mdd_pct
+                    logger.info(f"계산된 최대 낙폭(MDD): {mdd_pct:.2f}%")
+                else:
+                    kpis['max_drawdown_pct'] = 0.0
+                    logger.warning("MDD 분석 결과에서 'max' 키를 찾을 수 없습니다.")
+            except Exception as e:
+                logger.warning(f"MDD 계산 중 오류 발생: {str(e)}")
+                kpis['max_drawdown_pct'] = 0.0
+            
+            # 거래 분석 (있는 경우에만)
+            if 'trades' in self.analyzers:
+                try:
+                    # 거래 분석 결과를 안전하게 가져오기
+                    trade_analysis = {}
+                    try:
+                        if hasattr(self.analyzers['trades'], 'get_analysis'):
+                            trade_analysis = self.analyzers['trades'].get_analysis()
+                            logger.debug(f"거래 분석 결과: {trade_analysis}")
+                    except Exception as ta_error:
+                        logger.warning(f"거래 분석 결과를 가져오는 중 오류: {str(ta_error)}")
+                    
+                    # 기본값 설정
+                    kpis.update({
+                        'number_of_trades': 0,
+                        'win_rate': 0.0,
+                        'profit_factor': 0.0,
+                        'sqn': 0.0
+                    })
+                    
+                    # 거래 분석이 성공적으로 수행된 경우에만 계산 시도
+                    if trade_analysis:
+                        # 안전하게 딕셔너리로 변환 시도
+                        import collections
+                        
+                        def to_dict(obj):
+                            """객체를 딕셔너리로 변환"""
+                            # Node 클래스 참조 대신 hasattr로 체크
+                            if isinstance(obj, (int, float, str, bool)) or obj is None:
+                                return obj
+                            elif hasattr(obj, '__class__') and 'Node' in str(obj.__class__):
+                                return str(obj)
+                            elif isinstance(obj, dict):
+                                return {k: to_dict(v) for k, v in obj.items()}
+                            elif isinstance(obj, (list, tuple)):
+                                return [to_dict(x) for x in obj]
+                            elif hasattr(obj, '__dict__'):
+                                return {k: to_dict(v) for k, v in vars(obj).items() if not k.startswith('_')}
+                            else:
+                                return str(obj)
+                        
+                        try:
+                            # 분석 결과를 딕셔너리로 변환
+                            ta_dict = to_dict(trade_analysis)
+                            logger.debug(f"변환된 거래 분석 결과: {ta_dict}")
+                            
+                            # 총 거래 횟수 추출
+                            if 'total' in ta_dict and 'closed' in ta_dict['total']:
+                                kpis['number_of_trades'] = int(ta_dict['total']['closed'])
+                            
+                            # 승리한 거래 횟수와 승률 계산
+                            if 'won' in ta_dict and 'total' in ta_dict['won']:
+                                won_trades = int(ta_dict['won']['total'])
+                                if kpis['number_of_trades'] > 0:
+                                    kpis['win_rate'] = (won_trades / kpis['number_of_trades']) * 100
+                            
+                            # 수익 팩터 계산 (총 이익 / 총 손실)
+                            gross_profit = 0.0
+                            gross_loss = 0.0
+                            
+                            if 'pnl' in ta_dict and 'gross' in ta_dict['pnl']:
+                                gross = ta_dict['pnl']['gross']
+                                
+                                # gross가 딕셔너리인 경우에만 처리
+                                if isinstance(gross, dict):
+                                    # 총 이익 추출
+                                    if 'total' in gross and isinstance(gross['total'], dict) and 'total' in gross['total']:
+                                        try:
+                                            gross_profit = float(gross['total']['total'])
+                                        except (ValueError, TypeError):
+                                            gross_profit = 0.0
+                                    elif 'won' in gross and isinstance(gross['won'], dict) and 'total' in gross['won']:
+                                        try:
+                                            gross_profit = float(gross['won'].get('total', 0.0))
+                                        except (ValueError, TypeError):
+                                            gross_profit = 0.0
+                                    
+                                    # 총 손실 추출 (절대값으로 변환)
+                                    if 'lost' in gross and isinstance(gross['lost'], dict) and 'total' in gross['lost']:
+                                        try:
+                                            gross_loss = abs(float(gross['lost'].get('total', 0.0)))
+                                        except (ValueError, TypeError):
+                                            gross_loss = 0.0
+                                # gross가 숫자로 바로 주어지는 경우 (단일 값)
+                                elif isinstance(gross, (int, float)):
+                                    if gross > 0:
+                                        gross_profit = float(gross)
+                                    else:
+                                        gross_loss = abs(float(gross))
+                            
+                            # 수익 팩터 계산
+                            if gross_loss > 0:
+                                kpis['profit_factor'] = gross_profit / gross_loss if gross_profit > 0 else 0.0
+                            else:
+                                kpis['profit_factor'] = float('inf') if gross_profit > 0 else 0.0
+                            
+                            # SQN (System Quality Number) 추출
+                            if 'sqn' in ta_dict:
+                                try:
+                                    kpis['sqn'] = float(ta_dict['sqn'])
+                                except (ValueError, TypeError):
+                                    kpis['sqn'] = 0.0
+                            
+                            logger.debug(f"계산된 KPI: {kpis}")
+                            
+                        except Exception as calc_error:
+                            logger.error(f"KPI 계산 중 오류 발생: {str(calc_error)}", exc_info=True)
+                    
+                    # 추가 디버그 정보
+                    logger.debug(f"총 거래 횟수: {kpis['number_of_trades']}")
+                    logger.debug(f"승률: {kpis['win_rate']:.2f}%")
+                    logger.debug(f"수익 팩터: {kpis['profit_factor']}")
+                    logger.debug(f"SQN: {kpis['sqn']}")
+                    
+                except Exception as e:
+                    logger.error(f"거래 분석 처리 중 예상치 못한 오류: {str(e)}", exc_info=True)
+                    # 오류 발생 시 기본값 유지
+            
+            # 결과 저장
+            kpis['total_return_pct'] = self.results.get('return_pct', 0.0)
+            
+            # KPI 결과 포맷팅
+            formatted_kpis = {
+                'sharpe_ratio': round(kpis['sharpe_ratio'], 2),
+                'max_drawdown_pct': round(kpis['max_drawdown_pct'], 2),
+                'profit_factor': round(kpis['profit_factor'], 2) if kpis['profit_factor'] != float('inf') else float('inf'),
+                'win_rate': round(kpis['win_rate'], 2),
+                'number_of_trades': kpis['number_of_trades'],
+                'total_return_pct': round(kpis['total_return_pct'], 2)
             }
             
             # 결과에 KPI 저장
-            self.results['kpis'] = kpis
+            self.results['kpis'] = formatted_kpis
             
         except Exception as e:
             logger.error(f"KPI 계산 중 오류: {str(e)}", exc_info=True)
@@ -306,31 +417,113 @@ class BacktestEngine:
             }
     
     def _calculate_equity_curve(self) -> None:
-        """에퀴티 곡선을 계산하고 저장합니다."""
+        """에퀴티 곡선을 계산하고 저장합니다.
+        
+        TimeReturn 분석기에서 수익률을 가져와 누적 수익률을 계산하고,
+        이를 기반으로 에퀴티 곡선을 생성합니다.
+        """
         try:
-            # TimeReturn 분석기에서 수익률 시계열 가져오기
-            if hasattr(self, 'analyzers') and 'timereturn' in self.analyzers:
+            # 결과 딕셔너리 초기화
+            self.results['equity_curve'] = {}
+            self.equity_curve = pd.Series(dtype=float)
+            
+            # TimeReturn 분석기가 없는 경우 기본 에퀴티 곡선 생성
+            if not hasattr(self, 'analyzers') or 'timereturn' not in self.analyzers:
+                logger.warning("TimeReturn 분석기를 찾을 수 없습니다. 기본 에퀴티 곡선을 생성합니다.")
+                self.equity_curve = pd.Series([self.initial_capital])
+                self.results['equity_curve'] = {'0': float(self.initial_capital)}
+                return
+                
+            try:
                 timereturn = self.analyzers['timereturn']
-                if hasattr(timereturn, 'get_analysis'):
-                    returns = timereturn.get_analysis()
-                    if returns:
-                        self.equity_curve = pd.Series(returns)
-                        # 누적 수익률로 변환
-                        self.equity_curve = (1 + self.equity_curve).cumprod() - 1
-                        # 초기 자본을 곱하여 실제 가치로 변환
-                        self.equity_curve = (1 + self.equity_curve) * self.initial_capital
-                        # 결과에 저장
-                        self.results['equity_curve'] = self.equity_curve.to_dict()
-                        return
+                
+                # 분석기에서 데이터 안전하게 가져오기
+                if not hasattr(timereturn, 'get_analysis'):
+                    logger.warning("TimeReturn 분석기에 get_analysis 메서드가 없습니다.")
+                    return
+                
+                returns = timereturn.get_analysis()
+                
+                # 반환된 데이터 유효성 검사
+                if not returns or not isinstance(returns, dict) or len(returns) == 0:
+                    logger.warning("TimeReturn 분석기에서 유효한 데이터를 가져오지 못했습니다.")
+                    return
+                
+                logger.debug(f"TimeReturn 분석기에서 {len(returns)}개 데이터 포인트 수신")
+                
+                # 날짜와 값 분리
+                dates = []
+                values = []
+                
+                for date_key, value in returns.items():
+                    try:
+                        # 날짜 변환 시도
+                        if isinstance(date_key, (int, float)):
+                            # 유닉스 타임스탬프인 경우
+                            dt = pd.to_datetime(date_key, unit='s')
+                        else:
+                            # 이미 날짜 형식인 경우
+                            dt = pd.to_datetime(date_key)
+                        
+                        # 값 변환 시도 (숫자로 변환)
+                        try:
+                            val = float(value)
+                            dates.append(dt)
+                            values.append(val)
+                        except (ValueError, TypeError) as ve:
+                            logger.warning(f"값을 숫자로 변환할 수 없습니다: {value}, 오류: {str(ve)}")
+                            continue
+                            
+                    except Exception as dt_error:
+                        logger.warning(f"날짜 변환 중 오류 발생: {str(dt_error)}")
+                        continue
+                
+                # 유효한 데이터가 없는 경우
+                if not dates or not values:
+                    logger.warning("유효한 날짜 또는 값 데이터가 없습니다.")
+                    self.equity_curve = pd.Series([self.initial_capital])
+                    self.results['equity_curve'] = {'0': float(self.initial_capital)}
+                    return
+                
+                # 시계열 생성 및 정렬
+                self.equity_curve = pd.Series(values, index=pd.DatetimeIndex(dates))
+                self.equity_curve = self.equity_curve.sort_index()  # 날짜 순 정렬
+                
+                # 누적 수익률 계산 (1 + 수익률)의 누적곱 - 1
+                try:
+                    self.equity_curve = (1 + self.equity_curve).cumprod() - 1
+                    
+                    # 초기 자본을 곱하여 실제 가치로 변환
+                    self.equity_curve = (1 + self.equity_curve) * self.initial_capital
+                    
+                    # 결과 저장 (날짜 인덱스를 ISO 형식 문자열로 변환)
+                    self.results['equity_curve'] = {
+                        dt.isoformat(): float(val) if not pd.isna(val) else 0.0
+                        for dt, val in self.equity_curve.items()
+                    }
+                    
+                    # 디버그 정보 로깅
+                    logger.debug(f"에퀴티 곡선 생성 완료: {len(self.equity_curve)}개 데이터 포인트")
+                    logger.debug(f"초기 자본: {self.initial_capital}")
+                    logger.debug(f"최종 에퀴티: {self.equity_curve.iloc[-1] if len(self.equity_curve) > 0 else 0}")
+                    
+                except Exception as calc_error:
+                    logger.error(f"에퀴티 곡선 계산 중 오류: {str(calc_error)}", exc_info=True)
+                    # 오류 발생 시 기본 에퀴티 곡선 생성
+                    self.equity_curve = pd.Series([self.initial_capital])
+                    self.results['equity_curve'] = {'0': float(self.initial_capital)}
             
-            # 분석기에서 가져오지 못한 경우 빈 시리즈 생성
-            self.equity_curve = pd.Series()
-            self.results['equity_curve'] = {}
-            
+            except Exception as e:
+                logger.error(f"TimeReturn 분석기에서 데이터를 처리하는 중 오류: {str(e)}", exc_info=True)
+                # 오류 발생 시 기본 에퀴티 곡선 생성
+                self.equity_curve = pd.Series([self.initial_capital])
+                self.results['equity_curve'] = {'0': float(self.initial_capital)}
+                
         except Exception as e:
-            logger.error(f"에퀴티 곡선 계산 중 오류: {str(e)}", exc_info=True)
-            self.equity_curve = pd.Series()
-            self.results['equity_curve'] = {}
+            logger.error(f"에퀴티 곡선 생성 중 예상치 못한 오류: {str(e)}", exc_info=True)
+            # 예기치 않은 오류 발생 시 기본 에퀴티 곡선 생성
+            self.equity_curve = pd.Series([self.initial_capital])
+            self.results['equity_curve'] = {'0': float(self.initial_capital)}
     
     def get_summary(self) -> Dict[str, Any]:
         """백테스트 결과 요약을 반환합니다."""
@@ -350,6 +543,155 @@ class BacktestEngine:
         반환값:
             생성된 보고서 파일 경로
         """
+        try:
+            import os
+            import matplotlib.pyplot as plt
+            from datetime import datetime
+            
+            # 출력 디렉토리 생성
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # 보고서 파일 경로 생성
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            report_path = os.path.join(output_dir, f'backtest_report_{timestamp}.html')
+            
+            # KPI 요약 가져오기
+            summary = self.get_summary()
+            kpis = summary.get('kpis', {})
+            
+            # HTML 보고서 생성
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>백테스트 보고서 - {timestamp}</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; line-height: 1.6; margin: 0; padding: 20px; }}
+                    .container {{ max-width: 1200px; margin: 0 auto; }}
+                    .header {{ text-align: center; margin-bottom: 30px; }}
+                    .section {{ margin-bottom: 30px; }}
+                    .kpi-grid {{ 
+                        display: grid; 
+                        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); 
+                        gap: 15px; 
+                        margin-bottom: 20px;
+                    }}
+                    .kpi-card {{ 
+                        background: #f5f5f5; 
+                        padding: 15px; 
+                        border-radius: 5px; 
+                        text-align: center;
+                    }}
+                    .kpi-value {{ 
+                        font-size: 24px; 
+                        font-weight: bold; 
+                        color: #2c3e50;
+                        margin: 5px 0;
+                    }}
+                    .chart {{ margin: 30px 0; }}
+                    .positive {{ color: #27ae60; }}
+                    .negative {{ color: #e74c3c; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <div class="header">
+                        <h1>백테스트 보고서</h1>
+                        <p>생성 일시: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                    </div>
+                    
+                    <div class="section">
+                        <h2>요약</h2>
+                        <div class="kpi-grid">
+                            <div class="kpi-card">
+                                <div>초기 자본</div>
+                                <div class="kpi-value">${self.initial_capital:,.2f}</div>
+                            </div>
+                            <div class="kpi-card">
+                                <div>최종 자산</div>
+                                <div class="kpi-value">${summary['final_value']:,.2f}</div>
+                            </div>
+                            <div class="kpi-card">
+                                <div>총 수익률</div>
+                                <div class="kpi-value {0}">{1:.2f}%</div>
+                            </div>
+                            <div class="kpi-card">
+                                <div>거래 횟수</div>
+                                <div class="kpi-value">{2}</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <h2>성과 지표</h2>
+                        <div class="kpi-grid">
+                            <div class="kpi-card">
+                                <div>샤프 지수</div>
+                                <div class="kpi-value">{3:.2f}</div>
+                            </div>
+                            <div class="kpi-card">
+                                <div>최대 낙폭 (MDD)</div>
+                                <div class="kpi-value">{4:.2f}%</div>
+                            </div>
+                            <div class="kpi-card">
+                                <div>수익 인자</div>
+                                <div class="kpi-value">{5:.2f}</div>
+                            </div>
+                            <div class="kpi-card">
+                                <div>승률</div>
+                                <div class="kpi-value">{6:.2f}%</div>
+                            </div>
+                            <div class="kpi-card">
+                                <div>SQN</div>
+                                <div class="kpi-value">{7:.2f}</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="section">
+                        <h2>에퀴티 곡선</h2>
+                        <div class="chart">
+                            <img src="equity_curve.png" alt="에퀴티 곡선" style="width:100%; max-width:1000px;">
+                        </div>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """.format(
+                'positive' if summary['return_pct'] >= 0 else 'negative',
+                summary['return_pct'],
+                kpis.get('number_of_trades', 0),
+                kpis.get('sharpe_ratio', 0.0),
+                kpis.get('max_drawdown_pct', 0.0),
+                kpis.get('profit_factor', 0.0),
+                kpis.get('win_rate', 0.0),
+                kpis.get('sqn', 0.0)
+            )
+            
+            # 에퀴티 곡선 시각화
+            if hasattr(self, 'equity_curve') and not self.equity_curve.empty:
+                plt.figure(figsize=(12, 6))
+                self.equity_curve.plot(title='에퀴티 곡선', grid=True)
+                plt.xlabel('날짜')
+                plt.ylabel('자산 가치 (USDT)')
+                plt.tight_layout()
+                
+                # 이미지로 저장
+                chart_path = os.path.join(output_dir, 'equity_curve.png')
+                plt.savefig(chart_path, dpi=100, bbox_inches='tight')
+                plt.close()
+            
+            # HTML 파일 저장
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            logger.info(f"백테스트 보고서가 생성되었습니다: {os.path.abspath(report_path)}")
+            return os.path.abspath(report_path)
+            
+        except Exception as e:
+            logger.error(f"보고서 생성 중 오류 발생: {str(e)}", exc_info=True)
+            raise
         try:
             # 출력 디렉토리 생성
             os.makedirs(output_dir, exist_ok=True)

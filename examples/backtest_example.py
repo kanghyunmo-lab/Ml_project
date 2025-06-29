@@ -31,14 +31,15 @@ for directory in [REPORT_DIR, PLOT_DIR]:
 def load_sample_data():
     """샘플 OHLCV 데이터와 예측값을 생성합니다."""
     np.random.seed(42)  # 재현성을 위한 시드 설정
-    dates = pd.date_range(start='2023-01-01', periods=500, freq='4H')
+    dates = pd.date_range(start='2023-01-01', periods=500, freq='4h')
     n = len(dates)
     
     # 가상의 가격 데이터 생성
     prices = 50000 * np.cumprod(1 + np.random.normal(0.0005, 0.01, n))
     
     # OHLCV 데이터 생성
-    data = pd.DataFrame(index=dates)
+    data = pd.DataFrame()
+    data['datetime'] = dates
     data['open'] = prices
     data['high'] = prices * (1 + np.abs(np.random.normal(0, 0.005, n)))
     data['low'] = prices * (1 - np.abs(np.random.normal(0, 0.005, n)))
@@ -72,7 +73,7 @@ def run_backtest():
         )
         
         print("3. 백테스트 엔진에 데이터 로드 중...")
-        engine.load_data(str(temp_file))
+        engine.load_data(data)
         
         print("4. 트리플 배리어 전략 추가 중...")
         engine.add_strategy(TripleBarrierStrategy)
@@ -116,20 +117,41 @@ def run_backtest():
 
 def plot_equity_curve(engine, save_path=None):
     """백테스트 결과로부터 자산 곡선을 그립니다."""
-    if not isinstance(engine, BacktestEngine) or not engine.results:
+    if not isinstance(engine, BacktestEngine) or not hasattr(engine, 'results') or not engine.results:
         print("\n경고: 유효한 백테스트 엔진 또는 결과가 없어 자산 곡선을 그릴 수 없습니다.")
         return
         
     try:
-        equity_curve = engine.results.get('equity_curve')
-        if equity_curve is None or equity_curve.empty:
-            print("경고: 자산 곡선 데이터가 없습니다.")
+        equity_data = engine.results.get('equity_curve')
+        
+        # equity_curve가 딕셔너리인 경우 pandas Series로 변환
+        if isinstance(equity_data, dict):
+            if not equity_data:  # 빈 딕셔너리인 경우
+                print("경고: 자산 곡선 데이터가 비어 있습니다.")
+                return
+            # 딕셔너리를 pandas Series로 변환 (날짜 인덱스가 있는 경우)
+            equity_curve = pd.Series(equity_data)
+            if not isinstance(equity_curve.index, pd.DatetimeIndex):
+                # 인덱스가 날짜 형식이 아닌 경우, 단순 정수 인덱스 사용
+                equity_curve.index = pd.RangeIndex(len(equity_curve))
+        elif hasattr(equity_data, 'empty') and equity_data.empty:
+            print("경고: 자산 곡선 데이터가 비어 있습니다.")
             return
+        else:
+            equity_curve = equity_data
 
         plt.figure(figsize=(12, 6))
-        plt.plot(equity_curve.index, equity_curve['equity'], label='Equity Curve')
+        
+        # 시계열 데이터 플로팅 (날짜 인덱스가 있는 경우)
+        if isinstance(equity_curve.index, pd.DatetimeIndex):
+            plt.plot(equity_curve.index, equity_curve, label='Equity Curve')
+            plt.gcf().autofmt_xdate()  # 날짜 레이블 자동 조정
+        else:
+            # 날짜 인덱스가 없는 경우 단순 인덱스 사용
+            plt.plot(equity_curve.values, label='Equity Curve')
+            
         plt.title('Backtest Equity Curve')
-        plt.xlabel('Date')
+        plt.xlabel('Date' if isinstance(equity_curve.index, pd.DatetimeIndex) else 'Period')
         plt.ylabel('Equity (USDT)')
         plt.grid(True)
         plt.legend()

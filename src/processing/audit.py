@@ -4,12 +4,14 @@
 이 모듈은 수집된 암호화폐 시장 데이터의 품질을 검증하고, 
 결측치, 이상치, 중복 데이터 등을 탐지하여 보고서를 생성합니다.
 """
+import datetime
+import json
+import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta
 from loguru import logger
 from pydantic import BaseModel, Field, validator
 
@@ -52,7 +54,7 @@ class DataQualityMetrics(BaseModel):
     
     class Config:
         json_encoders = {
-            np.float64: lambda v: float(v) if not np.isnan(v) else None
+            float: lambda v: float(v) if not pd.isnull(v) else None
         }
 
 class DataQualityAuditor:
@@ -122,18 +124,25 @@ class DataQualityAuditor:
                 continue
                 
             # Z-score 계산
-            z_scores = np.abs((self.data[col] - self.data[col].mean()) / self.data[col].std())
-            
-            # 이상치 통계
-            outlier_mask = z_scores > z_threshold
-            outlier_count = outlier_mask.sum()
-            outlier_pct = (outlier_count / len(self.data)) * 100
-            
-            outlier_info[col] = {
-                'outlier_count': int(outlier_count),
-                'outlier_pct': round(float(outlier_pct), 2),
-                'max_z_score': round(float(z_scores.max()), 2)
-            }
+            mean = self.data[col].mean()
+            std = self.data[col].std()
+            if std > 0:  # 표준편차가 0이 아닌 경우에만 계산
+                z_scores = ((self.data[col] - mean) / std).abs()
+                outlier_mask = z_scores > z_threshold
+                outlier_count = outlier_mask.sum()
+                outlier_pct = (outlier_count / len(self.data)) * 100
+                
+                outlier_info[col] = {
+                    'outlier_count': int(outlier_count),
+                    'outlier_pct': round(float(outlier_pct), 2),
+                    'max_z_score': round(float(z_scores.max()), 2)
+                }
+            else:
+                outlier_info[col] = {
+                    'outlier_count': 0,
+                    'outlier_pct': 0.0,
+                    'max_z_score': 0.0
+                }
             
         return outlier_info
     
@@ -145,97 +154,152 @@ class DataQualityAuditor:
             if col not in self.data.columns:
                 continue
                 
-            stats[col] = {
-                'mean': float(self.data[col].mean()),
-                'std': float(self.data[col].std()),
-                'min': float(self.data[col].min()),
-                '25%': float(self.data[col].quantile(0.25)),
-                '50%': float(self.data[col].median()),
-                '75%': float(self.data[col].quantile(0.75)),
-                'max': float(self.data[col].max()),
-                'skew': float(self.data[col].skew()),
-                'kurtosis': float(self.data[col].kurtosis())
-            }
+            col_data = self.data[col].dropna()  # 결측치 제거
+            if len(col_data) > 0:  # 데이터가 있는 경우에만 계산
+                stats[col] = {
+                    'mean': float(col_data.mean()),
+                    'std': float(col_data.std() if len(col_data) > 1 else 0),
+                    'min': float(col_data.min()),
+                    '25%': float(col_data.quantile(0.25)),
+                    '50%': float(col_data.median()),
+                    '75%': float(col_data.quantile(0.75)),
+                    'max': float(col_data.max()),
+                    'count': int(col_data.count())
+                }
+            else:
+                stats[col] = {
+                    'mean': 0.0,
+                    'std': 0.0,
+                    'min': 0.0,
+                    '25%': 0.0,
+                    '50%': 0.0,
+                    '75%': 0.0,
+                    'max': 0.0,
+                    'count': 0
+                }
             
         return stats
     
-    def generate_report(self, z_threshold: float = 3.0) -> DataQualityMetrics:
-        """데이터 품질 보고서를 생성합니다."""
+    def generate_report(self, z_threshold: float = 3.0) -> Dict[str, Any]:
+        """
+        데이터 품질 보고서를 생성합니다.
+        
+        Args:
+            z_threshold (float): 이상치 탐지를 위한 Z-score 임계값
+            
+        Returns:
+            dict: 데이터 품질 메트릭을 포함한 딕셔너리
+        """
         logger.info(f"{self.symbol} 데이터 품질 감사를 시작합니다...")
         
-        # 기본 정보
-        start_date = self.data['datetime'].min().strftime('%Y-%m-%d %H:%M:%S')
-        end_date = self.data['datetime'].max().strftime('%Y-%m-%d %H:%M:%S')
-        total_rows = len(self.data)
-        
-        # 데이터 품질 메트릭 수집
-        missing_values = self.check_missing_values()
-        duplicate_rows = self.check_duplicates()
-        gaps = self.check_timeline_integrity()
-        price_stats = self.calculate_price_stats()
-        outlier_info = self.detect_outliers(z_threshold)
-        
-        # 보고서 생성
-        report = DataQualityMetrics(
-            start_date=start_date,
-            end_date=end_date,
-            total_rows=total_rows,
-            missing_values=missing_values,
-            duplicate_rows=duplicate_rows,
-            price_stats=price_stats,
-            outlier_info=outlier_info,
-            gaps_in_timeline=gaps
-        )
-        
-        logger.info(f"{self.symbol} 데이터 품질 감사가 완료되었습니다.")
-        return report
+        try:
+            # 기본 메트릭 수집
+            missing_values = self.check_missing_values()
+            duplicate_rows = self.check_duplicates()
+            gaps = self.check_timeline_integrity()
+            
+            # 통계 및 이상치 정보 수집
+            price_stats = self.calculate_price_stats()
+            outlier_info = self.detect_outliers(z_threshold)
+            
+            # 결과 딕셔너리 생성
+            report = {
+                'symbol': self.symbol,
+                'start_date': str(self.data.index.min()),
+                'end_date': str(self.data.index.max()),
+                'total_rows': int(len(self.data)),
+                'missing_values': missing_values,
+                'duplicate_rows': int(duplicate_rows) if isinstance(duplicate_rows, (int, float)) else 0,
+                'price_stats': price_stats,
+                'outlier_info': outlier_info,
+                'gaps_in_timeline': gaps or []
+            }
+            
+            logger.info(f"{self.symbol} 데이터 품질 감사가 완료되었습니다.")
+            return report
+            
+        except Exception as e:
+            logger.error(f"보고서 생성 중 오류 발생: {str(e)}")
+            raise
 
-def save_audit_report(report: DataQualityMetrics, output_dir: str = "../reports") -> str:
-    """감사 보고서를 JSON 파일로 저장합니다."""
-    import json
-    from pathlib import Path
+def save_audit_report(report: Dict[str, Any], output_dir: str = "../reports") -> str:
+    """
+    감사 보고서를 JSON 파일로 저장합니다.
     
+    Args:
+        report (dict): 저장할 보고서 딕셔너리
+        output_dir (str): 출력 디렉토리 경로
+        
+    Returns:
+        str: 저장된 파일 경로
+    """
     # 출력 디렉토리 생성
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     
-    # 파일명 생성 (예: audit_report_BTC_USDT_20230627_123456.json)
-    timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-    symbol = "_" + report.symbol.replace("/", "_") if hasattr(report, 'symbol') else ""
-    filename = f"audit_report{symbol}_{timestamp}.json"
-    filepath = output_path / filename
+    # 파일명 생성 (현재 시간 기반)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = os.path.join(output_dir, f"audit_report_{timestamp}.json")
     
     # JSON으로 저장
-    with open(filepath, 'w') as f:
-        json.dump(report.dict(), f, indent=2, ensure_ascii=False)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
     
-    logger.info(f"감사 보고서가 저장되었습니다: {filepath}")
-    return str(filepath)
+    logger.info(f"감사 보고서가 저장되었습니다: {output_path}")
+    return output_path
 
-def load_and_audit_data(filepath: str, symbol: str = "BTC/USDT") -> DataQualityMetrics:
-    """Parquet 파일을 로드하고 감사를 수행합니다."""
+def load_and_audit_data(filepath: str, symbol: str = "BTC/USDT") -> Dict[str, Any]:
+    """
+    Parquet 파일을 로드하고 감사를 수행합니다.
+    
+    Args:
+        filepath (str): Parquet 파일 경로
+        symbol (str): 심볼 (예: 'BTC/USDT')
+        
+    Returns:
+        dict: 데이터 품질 메트릭을 포함한 딕셔너리
+    """
     logger.info(f"데이터 로드 중: {filepath}")
     
-    # 데이터 로드
     try:
+        # 데이터 로드
         df = pd.read_parquet(filepath)
         logger.info(f"데이터 로드 완료: {len(df)}개의 행")
         
-        # 감사 수행
-        auditor = DataQualityAuditor(df, symbol=symbol)
+        # 감사 실행
+        auditor = DataQualityAuditor(df, symbol)
         report = auditor.generate_report()
+        
+        if not report:
+            raise ValueError("보고서 생성에 실패했습니다.")
         
         # 보고서 저장
         report_path = save_audit_report(report)
         logger.info(f"감사 보고서: {report_path}")
         
-        return report.dict()
+        # 결과 출력
+        print("\n=== 데이터 품질 감사 결과 ===")
+        print(f"심볼: {report.get('symbol', 'N/A')}")
+        print(f"기간: {report.get('start_date', 'N/A')} ~ {report.get('end_date', 'N/A')}")
+        print(f"총 행 수: {report.get('total_rows', 0):,}")
+        print(f"중복 행 수: {report.get('duplicate_rows', 0)}")
+        
+        missing_values = report.get('missing_values', {})
+        if isinstance(missing_values, dict):
+            missing_count = len([k for k, v in missing_values.items() if v > 0])
+            print(f"결측치가 있는 컬럼 수: {missing_count}")
+        
+        gaps = report.get('gaps_in_timeline', [])
+        print(f"타임라인 누락 구간: {len(gaps)}개")
+        
+        return report
         
     except Exception as e:
-        logger.error(f"데이터 로드 또는 감사 중 오류 발생: {e}")
-        raise
-
-def run_data_audit(data: pd.DataFrame, symbol: str = "BTC/USDT") -> 'DataQualityMetrics':
+        error_msg = f"오류가 발생했습니다: {str(e)}"
+        logger.error(error_msg)
+        print(error_msg)
+        return {}
+        
+def run_data_audit(data: pd.DataFrame, symbol: str = "BTC/USDT") -> Dict[str, Any]:
     """
     데이터 품질 감사를 실행하고 결과를 반환합니다.
     
