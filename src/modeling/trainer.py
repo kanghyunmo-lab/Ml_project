@@ -82,6 +82,9 @@ class ModelTrainer:
             # [0, 1, 2] -> [-1, 0, 1]
             return y.map({0: -1, 1: 0, 2: 1})
             
+        # 변환 후 레이블 분포 로깅
+        logger.info(f"레이블 변환 후 분포: {y.value_counts().to_dict()}")
+            
     def train(
         self, 
         X: pd.DataFrame, 
@@ -179,23 +182,58 @@ class ModelTrainer:
         logger.info(f"Training completed. Avg Accuracy: {avg_metrics['accuracy']:.4f}")
         return avg_metrics
     
-    def predict(self, X: pd.DataFrame) -> np.ndarray:
+    def predict(self, X: pd.DataFrame, return_proba: bool = False, verbose: bool = True) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """
         훈련된 모델로 예측을 수행합니다.
         
         Args:
             X (pd.DataFrame): 예측할 데이터
+            return_proba (bool): True면 예측 확률도 함께 반환
+            verbose (bool): 예측 분포 로깅 여부
             
         Returns:
             np.ndarray: 예측 클래스 (1, 0, -1)
+            np.ndarray: (선택사항) 각 클래스에 대한 예측 확률
         """
         if self.model is None:
             raise ValueError("Model is not trained yet. Call train() first.")
             
-        # 예측 확률을 클래스로 변환 (LightGBM 형식 [0,1,2]를 원래 형식 [-1,0,1]로 변환)
+        # 예측 확률 계산
         pred_proba = self.model.predict(X, num_iteration=self.model.best_iteration)
+        
+        # 예측 분포 로깅
+        if verbose:
+            class_names = {0: 'Sell (-1)', 1: 'Hold (0)', 2: 'Buy (1)'}
+            pred_counts = pd.Series(np.argmax(pred_proba, axis=1)).value_counts().sort_index()
+            logger.info("Prediction distribution before conversion:")
+            for cls, count in pred_counts.items():
+                logger.info(f"  {class_names[cls]}: {count} samples ({count/len(pred_proba):.1%})")
+            
+            # 예측 확률의 평균값 로깅
+            avg_proba = pred_proba.mean(axis=0)
+            logger.info("Average prediction probabilities:")
+            for cls, proba in enumerate(avg_proba):
+                logger.info(f"  {class_names[cls]}: {proba:.4f}")
+            
+            # 각 클래스별 최대 확률 샘플 로깅
+            logger.info("\nSample predictions:")
+            max_indices = np.argmax(pred_proba, axis=1)
+            for i in range(min(5, len(pred_proba))):
+                idx = max_indices[i]
+                logger.info(f"  Row {i}: Sell={pred_proba[i][0]:.4f}, Hold={pred_proba[i][1]:.4f}, Buy={pred_proba[i][2]:.4f} -> Prediction={class_names[idx]}")
+        
+        # 예측 클래스 변환 (LightGBM 형식 [0,1,2] -> 트레이딩 신호 [-1,0,1])
         y_pred_lgb = np.argmax(pred_proba, axis=1)
-        return self._convert_labels(pd.Series(y_pred_lgb), to_lightgbm=False).values
+        y_pred = self._convert_labels(pd.Series(y_pred_lgb), to_lightgbm=False).values
+        
+        # 변환된 예측값 분포 로깅
+        if verbose:
+            pred_counts = pd.Series(y_pred).value_counts().sort_index()
+            logger.info("\nPrediction distribution after conversion:")
+            for signal, count in pred_counts.items():
+                logger.info(f"  Signal {signal}: {count} samples ({count/len(pred_proba):.1%})")
+        
+        return (y_pred, pred_proba) if return_proba else y_pred
     
     def _evaluate(
         self, 
